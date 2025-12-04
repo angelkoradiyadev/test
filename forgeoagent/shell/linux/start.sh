@@ -1,0 +1,4 @@
+#!/bin/bash
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+python3.12 "$SCRIPT_DIR/../../start.py"
