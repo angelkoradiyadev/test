@@ -3,7 +3,7 @@
 Content Image Fetcher Service
 
 This module provides functionality to fetch content with images using multiple sources:
-- Browser automation (Selenium) for high-quality images with automatic fallback
+- requests-html (lightweight JS rendering) for high-quality images with automatic fallback
 - Page source parsing for fast, lightweight extraction
 - Gemini API for AI-powered image suggestions (optional)
 
@@ -21,15 +21,7 @@ from urllib.parse import quote
 import logging
 from bs4 import BeautifulSoup
 import time
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from selenium.common.exceptions import TimeoutException, NoSuchElementException, WebDriverException
-from webdriver_manager.chrome import ChromeDriverManager
+from requests_html import HTMLSession
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -38,17 +30,17 @@ logger = logging.getLogger(__name__)
 class ContentImageFetcher:
     """
     Unified image fetcher that combines multiple extraction methods:
-    - Browser automation (high quality, with automatic fallback)
+    - requests-html session (lightweight JS rendering, with automatic fallback)
     - Page source parsing (fast, lightweight)
     - Gemini API (AI-powered suggestions, optional)
     
-    Automatically tries browser extraction first, falls back to page source if it fails.
+    Automatically tries session extraction first, falls back to page source if it fails.
     Supports downloading images and converting them to base64 format.
     """
     
     def __init__(self, gemini_api_keys: List[str], headless: bool = True, default_timeout_ms: int = 30000):
         """
-        Initialize the ContentImageFetcher with Gemini API credentials and browser settings.
+        Initialize the ContentImageFetcher with Gemini API credentials and session settings.
         
         Args:
             gemini_api_keys: List of Gemini API keys for authentication and load balancing
@@ -57,8 +49,8 @@ class ContentImageFetcher:
         """
         self.gemini_api_keys = gemini_api_keys
         self.headless = headless
-        self.default_timeout_seconds = default_timeout_ms / 1000  # Convert to seconds for Selenium
-        self.driver: Optional[webdriver.Chrome] = None
+        self.default_timeout_seconds = default_timeout_ms / 1000  # Convert to seconds
+        self.session: Optional[HTMLSession] = None
         
         self.gemini_system_prompt = (
             "Give relevant topic working images links and title based on the given description. "
@@ -91,39 +83,26 @@ class ContentImageFetcher:
             # output_required=self.gemini_output_required_fields
         )
     
-    def _initialize_browser(self):
+    def _initialize_session(self):
         """
-        Initialize and start the Selenium browser instance.
+        Initialize the requests-html session.
         
-        Creates a new Chrome browser with webdriver-manager if not already initialized.
-        Uses /tmp directory for ChromeDriver cache to avoid read-only file system errors.
+        Creates a new HTMLSession if not already initialized.
         """
-        if not self.driver:
-            chrome_options = Options()
-            if self.headless:
-                chrome_options.add_argument('--headless')
-            chrome_options.add_argument('--no-sandbox')
-            chrome_options.add_argument('--disable-dev-shm-usage')
-            chrome_options.add_argument('--disable-gpu')
-            chrome_options.add_argument('--window-size=1920,1080')
-            chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
-            
-            # Use webdriver-manager with /tmp cache path to avoid read-only file system errors
-            service = Service(ChromeDriverManager(path='/tmp/.wdm').install())
-            self.driver = webdriver.Chrome(service=service, options=chrome_options)
-            self.driver.set_page_load_timeout(self.default_timeout_seconds)
-            logger.info("Browser started successfully")
+        if not self.session:
+            self.session = HTMLSession()
+            logger.info("HTML session started successfully")
     
-    def _terminate_browser(self):
+    def _terminate_session(self):
         """
-        Close and cleanup the browser instance.
+        Close and cleanup the session instance.
         
-        Properly closes the browser and resets instance variables.
+        Properly closes the session and resets instance variables.
         """
-        if self.driver:
-            self.driver.quit()
-            self.driver = None
-            logger.info("Browser closed")
+        if self.session:
+            self.session.close()
+            self.session = None
+            logger.info("Session closed")
     
     def _extract_high_quality_images(
         self, 
@@ -131,13 +110,12 @@ class ContentImageFetcher:
         max_image_count: int = 10
     ) -> List[Dict[str, str]]:
         """
-        Extract high-quality images from Google Images by clicking on thumbnails.
+        Extract high-quality images from Google Images using requests-html.
         
-        This method automates the process of:
-        1. Navigating to Google Images with the search query
-        2. Finding and clicking on image thumbnails
-        3. Extracting the high-resolution image from the preview window
-        4. Collecting metadata (title, source URL)
+        This method uses requests-html to:
+        1. Navigate to Google Images with the search query
+        2. Render JavaScript to load dynamic content
+        3. Extract image URLs and metadata from the rendered page
         
         Args:
             search_query: The search query for Google Images
@@ -145,153 +123,84 @@ class ContentImageFetcher:
             
         Returns:
             List of dictionaries containing:
-                - image_url: High-quality image URL from preview window
+                - image_url: High-quality image URL
                 - image_title: Title/alt text of the image
                 - source_url: Source webpage URL where the image originates
         """
         extracted_images_data = []
         
         try:
-            self._initialize_browser()
+            self._initialize_session()
             
             # Navigate to Google Images
             google_images_url = f"https://www.google.com/search?q={quote(search_query)}&tbm=isch"
-            logger.info(f"Navigating to: {google_images_url}")
-            self.driver.get(google_images_url)
+            logger.info(f"Fetching: {google_images_url}")
             
-            # Wait for images to load
-            time.sleep(2)
+            response = self.session.get(google_images_url)
             
-            # Get all image thumbnails
-            all_image_elements = self.driver.find_elements(By.CSS_SELECTOR, 'img[src], img[data-src]')
-            logger.info(f"Found {len(all_image_elements)} image elements")
+            # Render JavaScript to load dynamic content
+            logger.info("Rendering JavaScript content...")
+            response.html.render(timeout=int(self.default_timeout_seconds), sleep=2)
             
-            # Filter to get actual image thumbnails (not UI elements)
-            valid_image_thumbnails = []
-            for thumbnail_element in all_image_elements:
-                try:
-                    alt_text = thumbnail_element.get_attribute('alt')
-                    if alt_text and len(alt_text) > 3:  # Has meaningful alt text
-                        valid_image_thumbnails.append(thumbnail_element)
-                except:
-                    continue
+            # Find all image elements
+            img_elements = response.html.find('img')
+            logger.info(f"Found {len(img_elements)} image elements")
             
-            logger.info(f"Found {len(valid_image_thumbnails)} valid image thumbnails")
-            
-            # Click on each thumbnail and extract the preview image
-            successfully_extracted_count = 0
-            for thumbnail_index, thumbnail_element in enumerate(valid_image_thumbnails):
-                # Skip first thumbnail (often a UI element)
-                if thumbnail_index == 0:
-                    continue
-                    
-                if successfully_extracted_count >= max_image_count:
+            # Extract image data
+            for img in img_elements:
+                if len(extracted_images_data) >= max_image_count:
                     break
                 
                 try:
-                    # Get thumbnail info before clicking
-                    thumbnail_alt_text = thumbnail_element.get_attribute('alt')
+                    # Get image attributes
+                    img_src = img.attrs.get('src', '') or img.attrs.get('data-src', '')
+                    img_alt = img.attrs.get('alt', 'No title')
                     
-                    # Skip if no alt text or if it's a UI element
-                    if not thumbnail_alt_text or len(thumbnail_alt_text) < 3:
+                    # Skip if no src or if it's a data URI or too short alt text
+                    if not img_src or img_src.startswith('data:') or len(img_alt) < 3:
                         continue
                     
-                    logger.info(f"Clicking thumbnail {thumbnail_index + 1}: {thumbnail_alt_text[:50]}...")
+                    # Skip Google UI elements (logo, icons, etc.)
+                    if 'logo' in img_alt.lower() or 'icon' in img_alt.lower():
+                        continue
                     
-                    # Scroll thumbnail into view
-                    self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", thumbnail_element)
-                    time.sleep(0.3)
+                    # Try to find parent link for source URL
+                    source_url = ''
+                    parent = img.element.getparent()
+                    while parent is not None:
+                        if parent.tag == 'a' and 'href' in parent.attrib:
+                            source_url = parent.attrib['href']
+                            break
+                        parent = parent.getparent()
                     
-                    # Click the thumbnail
-                    try:
-                        thumbnail_element.click()
-                    except:
-                        # Try JavaScript click if regular click fails
-                        self.driver.execute_script("arguments[0].click();", thumbnail_element)
+                    logger.info(f"Extracted image: {img_src[:80]}...")
+                    extracted_images_data.append({
+                        'image_url': img_src,
+                        'image_title': img_alt,
+                        'source_url': source_url,
+                    })
                     
-                    # Wait for preview to load
-                    time.sleep(2)
-                    
-                    # Extract the high-quality image URL from preview using JavaScript
-                    preview_image_data = self.driver.execute_script("""
-                        const imgs = document.querySelectorAll('img');
-                        let bestImg = null;
-                        let maxSize = 0;
-                        
-                        for (const img of imgs) {
-                            if (img.src && img.src.startsWith('http') && 
-                                img.naturalWidth * img.naturalHeight > maxSize) {
-                                
-                                // Check if it's in a dialog or preview container
-                                const inDialog = img.closest('[role="dialog"]') || 
-                                               img.closest('div[jsaction]');
-                                
-                                if (inDialog && img.naturalWidth > 200 && img.naturalHeight > 200) {
-                                    maxSize = img.naturalWidth * img.naturalHeight;
-                                    bestImg = img;
-                                }
-                            }
-                        }
-                        
-                        if (bestImg) {
-                            // Try to find source URL
-                            let sourceUrl = '';
-                            const linkElement = bestImg.closest('a');
-                            if (linkElement) {
-                                sourceUrl = linkElement.href || '';
-                            }
-                            
-                            return {
-                                image_url: bestImg.src,
-                                image_title: bestImg.alt || 'No title',
-                                source_url: sourceUrl,
-                                width: bestImg.naturalWidth,
-                                height: bestImg.naturalHeight
-                            };
-                        }
-                        return null;
-                    """)
-                    
-                    if preview_image_data and preview_image_data.get('image_url'):
-                        logger.info(f"Extracted image: {preview_image_data['image_url'][:80]}...")
-                        logger.info(f"  Size: {preview_image_data.get('width')}x{preview_image_data.get('height')}")
-                        extracted_images_data.append({
-                            'image_url': preview_image_data['image_url'],
-                            'image_title': preview_image_data.get('image_title', 'No title'),
-                            'source_url': preview_image_data.get('source_url', ''),
-                        })
-                        successfully_extracted_count += 1
-                    else:
-                        logger.warning(f"Could not extract image data for thumbnail {thumbnail_index + 1}")
-                    
-                    # Close preview by pressing Escape
-                    webdriver.ActionChains(self.driver).send_keys(Keys.ESCAPE).perform()
-                    time.sleep(0.5)
-                    
-                except TimeoutException:
-                    logger.warning(f"Timeout clicking thumbnail {thumbnail_index + 1}")
-                    continue
                 except Exception as e:
-                    logger.warning(f"Error processing thumbnail {thumbnail_index + 1}: {e}")
+                    logger.warning(f"Error processing image element: {e}")
                     continue
             
-            logger.info(f"Successfully extracted {len(extracted_images_data)} images via browser")
+            logger.info(f"Successfully extracted {len(extracted_images_data)} images via requests-html")
             
         except Exception as e:
-            logger.error(f"Error during browser image extraction: {e}")
+            logger.error(f"Error during image extraction: {e}")
             raise  # Re-raise to trigger fallback
         finally:
-            self._terminate_browser()
+            self._terminate_session()
         
         return extracted_images_data
     
-    def _extract_images_with_browser_sync(
+    def _extract_images_with_session_sync(
         self, 
         search_query: str, 
         max_image_count: int = 10
     ) -> List[Dict[str, str]]:
         """
-        Synchronous browser-based image extraction.
+        Synchronous session-based image extraction using requests-html.
         
         Args:
             search_query: The search query for Google Images
@@ -515,8 +424,8 @@ class ContentImageFetcher:
         Fetch images for specific content using multiple sources with automatic fallback.
         
         Extraction strategy:
-        1. Try browser automation (high quality) first
-        2. If browser fails, automatically fallback to page source parsing (fast)
+        1. Try requests-html extraction (lightweight with JS rendering) first
+        2. If that fails, automatically fallback to page source parsing (fast)
         3. Optionally fetch AI-powered suggestions from Gemini API
         
         Args:
@@ -525,12 +434,12 @@ class ContentImageFetcher:
             convert_to_base64: Whether to convert images to base64 data URIs
             use_gemini_api: Whether to fetch image suggestions from Gemini API
             max_images_per_source: Maximum number of images to extract from each source
-            run_browser_headless: Whether to run browser in headless mode (for browser extraction)
+            run_browser_headless: Whether to run in headless mode (for session extraction)
         
         Returns:
             Dictionary containing:
-                - images_data: List of images (from browser or page source fallback)
-                - extraction_method: 'browser' or 'page_source' indicating which method succeeded
+                - images_data: List of images (from session or page source fallback)
+                - extraction_method: 'session' or 'page_source' indicating which method succeeded
                 - gemini_response: Gemini API response with image suggestions (if enabled)
                 - all_images_data: Combined list of all base64 encoded images
                 - all_images_links: Combined list of all image URLs
@@ -543,20 +452,20 @@ class ContentImageFetcher:
         images_data = []
         extraction_method = None
         
-        # Update browser headless setting
+        # Update headless setting
         self.headless = run_browser_headless
         
-        # Try browser extraction first, fallback to page source on failure
+        # Try session extraction first, fallback to page source on failure
         try:
-            logger.info("Attempting browser-based image extraction...")
-            browser_images = self._extract_images_with_browser_sync(
+            logger.info("Attempting requests-html session-based image extraction...")
+            session_images = self._extract_images_with_session_sync(
                 search_query=search_query,
                 max_image_count=max_images_per_source
             )
             
-            if browser_images:
+            if session_images:
                 # Convert to base64 if requested
-                for img_info in browser_images:
+                for img_info in session_images:
                     image_url = img_info.get('image_url', '')
                     image_title = img_info.get('image_title', 'No title')
                     source_url = img_info.get('source_url', '')
@@ -573,19 +482,19 @@ class ContentImageFetcher:
                         if base64_image_data:
                             image_metadata['image_data'] = base64_image_data
                             image_metadata['is_base64'] = True
-                            logger.info(f"Converted browser image to base64: {image_title[:50]}...")
+                            logger.info(f"Converted session image to base64: {image_title[:50]}...")
                         else:
                             logger.warning(f"Failed to convert to base64, keeping URL: {image_title[:50]}...")
                     
                     images_data.append(image_metadata)
                 
-                extraction_method = 'browser'
-                logger.info(f"Browser extraction successful: {len(images_data)} images")
+                extraction_method = 'session'
+                logger.info(f"Session extraction successful: {len(images_data)} images")
             else:
-                raise Exception("Browser extraction returned no images")
+                raise Exception("Session extraction returned no images")
                 
         except Exception as e:
-            logger.warning(f"Browser extraction failed: {e}. Falling back to page source extraction...")
+            logger.warning(f"Session extraction failed: {e}. Falling back to page source extraction...")
             
             # Fallback to page source extraction
             search_query_with_hint = search_query + "\n Give relevant images valid links for this topic from google search "
@@ -644,7 +553,7 @@ def fetch_content_images(
     """
     Standalone function to fetch and convert images for given content.
     
-    Automatically tries browser extraction first, falls back to page source if it fails.
+    Automatically tries requests-html session extraction first, falls back to page source if it fails.
     
     Args:
         content_title: Main title for the content
@@ -653,7 +562,7 @@ def fetch_content_images(
         convert_to_base64: Whether to convert images to base64 data URIs
         use_gemini_api: Whether to fetch image suggestions from Gemini API
         max_images_per_source: Maximum images to extract from each source (default: 10)
-        run_browser_headless: Whether to run browser in headless mode
+        run_browser_headless: Whether to run in headless mode
         
     Returns:
         Dictionary containing images from various sources and aggregated lists
@@ -683,7 +592,7 @@ if __name__ == "__main__":
     description = "Stunning landscapes and wildlife photography"
     
     print("=" * 80)
-    print("AUTOMATIC EXTRACTION (Browser with Page Source Fallback)")
+    print("AUTOMATIC EXTRACTION (requests-html with Page Source Fallback)")
     print("=" * 80)
     result = fetch_content_images(
         content_title=title,
