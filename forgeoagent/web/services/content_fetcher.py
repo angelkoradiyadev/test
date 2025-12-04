@@ -96,6 +96,7 @@ class ContentImageFetcher:
         Initialize and start the Selenium browser instance.
         
         Creates a new Chrome browser with webdriver-manager if not already initialized.
+        Uses /tmp directory for ChromeDriver cache to avoid read-only file system errors.
         """
         if not self.driver:
             chrome_options = Options()
@@ -107,8 +108,8 @@ class ContentImageFetcher:
             chrome_options.add_argument('--window-size=1920,1080')
             chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
             
-            # Use webdriver-manager to automatically handle ChromeDriver
-            service = Service(ChromeDriverManager().install())
+            # Use webdriver-manager with /tmp cache path to avoid read-only file system errors
+            service = Service(ChromeDriverManager(path='/tmp/.wdm').install())
             self.driver = webdriver.Chrome(service=service, options=chrome_options)
             self.driver.set_page_load_timeout(self.default_timeout_seconds)
             logger.info("Browser started successfully")
