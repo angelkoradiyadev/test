@@ -21,7 +21,8 @@ from urllib.parse import quote
 import logging
 from bs4 import BeautifulSoup
 import time
-from requests_html import HTMLSession
+from requests_html import AsyncHTMLSession
+import asyncio
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -50,7 +51,7 @@ class ContentImageFetcher:
         self.gemini_api_keys = gemini_api_keys
         self.headless = headless
         self.default_timeout_seconds = default_timeout_ms / 1000  # Convert to seconds
-        self.session: Optional[HTMLSession] = None
+        self.session: Optional[AsyncHTMLSession] = None
         
         self.gemini_system_prompt = (
             "Give relevant topic working images links and title based on the given description. "
@@ -83,28 +84,28 @@ class ContentImageFetcher:
             # output_required=self.gemini_output_required_fields
         )
     
-    def _initialize_session(self):
+    async def _initialize_session(self):
         """
-        Initialize the requests-html session.
+        Initialize the requests-html async session.
         
-        Creates a new HTMLSession if not already initialized.
+        Creates a new AsyncHTMLSession if not already initialized.
         """
         if not self.session:
-            self.session = HTMLSession()
+            self.session = AsyncHTMLSession()
             logger.info("HTML session started successfully")
     
-    def _terminate_session(self):
+    async def _terminate_session(self):
         """
         Close and cleanup the session instance.
         
         Properly closes the session and resets instance variables.
         """
         if self.session:
-            self.session.close()
+            await self.session.close()
             self.session = None
             logger.info("Session closed")
     
-    def _extract_high_quality_images(
+    async def _extract_high_quality_images(
         self, 
         search_query: str, 
         max_image_count: int = 10
@@ -130,17 +131,17 @@ class ContentImageFetcher:
         extracted_images_data = []
         
         try:
-            self._initialize_session()
+            await self._initialize_session()
             
             # Navigate to Google Images
             google_images_url = f"https://www.google.com/search?q={quote(search_query)}&tbm=isch"
             logger.info(f"Fetching: {google_images_url}")
             
-            response = self.session.get(google_images_url)
+            response = await self.session.get(google_images_url)
             
             # Render JavaScript to load dynamic content
             logger.info("Rendering JavaScript content...")
-            response.html.render(timeout=int(self.default_timeout_seconds), sleep=2)
+            await response.html.arender(timeout=int(self.default_timeout_seconds), sleep=2)
             
             # Find all image elements
             img_elements = response.html.find('img')
@@ -190,7 +191,7 @@ class ContentImageFetcher:
             logger.error(f"Error during image extraction: {e}")
             raise  # Re-raise to trigger fallback
         finally:
-            self._terminate_session()
+            await self._terminate_session()
         
         return extracted_images_data
     
@@ -200,7 +201,7 @@ class ContentImageFetcher:
         max_image_count: int = 10
     ) -> List[Dict[str, str]]:
         """
-        Synchronous session-based image extraction using requests-html.
+        Synchronous wrapper for async session-based image extraction.
         
         Args:
             search_query: The search query for Google Images
@@ -209,7 +210,19 @@ class ContentImageFetcher:
         Returns:
             List of dictionaries with image data (image_url, image_title, source_url)
         """
-        return self._extract_high_quality_images(search_query, max_image_count)
+        # Run async method in a new event loop or use existing one
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # If we're already in an event loop, create a task
+                import nest_asyncio
+                nest_asyncio.apply()
+                return loop.run_until_complete(self._extract_high_quality_images(search_query, max_image_count))
+            else:
+                return loop.run_until_complete(self._extract_high_quality_images(search_query, max_image_count))
+        except RuntimeError:
+            # No event loop exists, create a new one
+            return asyncio.run(self._extract_high_quality_images(search_query, max_image_count))
     
     def download_image_as_base64(self, image_url: str, request_timeout_seconds: int = 10) -> Optional[str]:
         """
